@@ -476,9 +476,14 @@ python tools/release.py patch --dry-run     # 只打印要做什么
 `.github/workflows/ci.yml`：push 到 `main` / PR 时跑测试 + 构建校验（目前只跑 Python 3.12，
 即本机验过的版本；要扩矩阵就改 `python-version` 列表）。
 
-**发 PyPI（可选，默认关）**：把仓库变量 `ENABLE_PYPI` 设为 `true`，并在 PyPI 配好
-Trusted Publisher（owner=`DreamXiaoJing`、repo=`chrome-fp`、workflow=`release.yml`、
-environment=`pypi`），release 流程里的 `pypi` job 就会用 OIDC 发布 —— 不需要任何长期 token。
+**PyPI 发布（本仓库已启用）**：tag 推送时会自动发到 PyPI —— PyPI 项目页已配好
+Trusted Publisher（Repository=`DreamXiaoJing/chrome-fp`、Workflow=`release.yml`、
+Environment=`pypi`），仓库变量 `ENABLE_PYPI` = `true`，用 OIDC 换 token，**没有任何长期密钥**。
+
+> 换到别的仓库/账号要重做两步：① PyPI → 项目 → *Settings → Publishing* 里加 GitHub
+> Trusted Publisher（owner / repo / workflow / environment 四项，和上面工作流一致）；
+> ② 仓库 Settings → Variables 里加 `ENABLE_PYPI=true`。没配之前 `pypi` job 会自动跳过，
+> 不会让流程变红。
 
 ### 手动构建（备用）
 
@@ -537,6 +542,7 @@ tools/            真机抓包探针(tap_probe/run_capture/launch_chrome) + 指�
                   (analyze_hello) + 本库与真机对比(verify_against_probe)
                   + 发版工具(release.py 改版本号打 tag / check_release.py 一致性校验 /
                   make_release_notes.py 生成 Release 正文)
+                  + cdp.py(用 9222 上已开的 Chrome/Edge 做只读检查与表单填写)
 .github/workflows/  release.yml（tag 自动发版）+ ci.yml（push/PR 跑测试与构建）
 tests/            单元 + 与真机抓包的回归测试（97 个用例, 其中 17 个需要抓包数据）
 capture/          真机抓包证据（chrome154* / chrome153cft / library154；.gitignore 未提交）
