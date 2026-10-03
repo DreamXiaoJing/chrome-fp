@@ -422,13 +422,15 @@ DNS 返回多个地址（尤其 IPv6 排在前面）时会**自己遍历并 IPv4
 ## 测试
 
 ```bash
+python -m pip install ".[test]"              # h2 是测试用的独立 HTTP/2 裁判
 python -m unittest discover -s tests -v      # 97 个用例(80 通过 / 17 跳过)
 python -m pytest tests -q                    # 同上, 输出更紧凑
 ```
 
-> 需要抓包数据的用例（`test_chrome153_fingerprint.py`）在本机找不到 `capture/chrome153/`
-> 时会**自动跳过** —— 就是那 17 个 skip。端到端 / 线级校验现在走
-> 「抓包与验证工具链」一节的 `tools/run_capture.py` + `tools/verify_against_probe.py`。
+> 没装 `h2` 时，用到它的两组用例（`test_http2_features` / `test_client_hints`）会**整组跳过**
+> 而不是挂死 —— 之前缺 `h2` 会让服务线程直接崩掉、客户端一直等响应（CI 上卡了 10 分钟才被发现）；
+> 现在配了 `timeout-minutes`，就算再挂也是 15 分钟失败。
+> 需要抓包数据的用例（`test_chrome153_fingerprint.py`）找不到 `capture/chrome153/` 时也自动跳过。
 
 | 测试文件 | 覆盖 |
 |---|---|
