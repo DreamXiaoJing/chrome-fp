@@ -1,0 +1,133 @@
+name: release
+
+# 打 tag(v*) 自动: 跑测试 -> 构建 -> 校验 -> 发 GitHub Release(wheel/sdist/SHA256SUMS)。
+# 手动触发(workflow_dispatch)只跑测试+构建, 不发 Release, 产物留在 Actions artifact 里。
+#
+# 版本必须三处一致: tag(去掉 v) == pyproject.toml 的 version == chrome_fp/__init__.py 的 __version__。
+# 对不上就直接失败, 免得发出去一个版本号错乱的包。校验逻辑在 tools/check_release.py(本机可跑)。
+#
+# 本机一条命令发版: python tools/release.py patch   (改版本号 + 跑测试 + 提交 + 打 tag + push)
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: 测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 安装运行时依赖
+        run: |
+          python -m pip install --upgrade pip "setuptools>=77" wheel
+          python -m pip install cryptography hpack brotli zstandard certifi
+      - name: unit tests (unittest discover, 与 README 一致)
+        run: python -m unittest discover -s tests -v
+
+  build:
+    name: 构建产物
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 安装构建工具
+        run: python -m pip install --upgrade pip "setuptools>=77" build twine
+      - name: 版本一致性校验(tag / pyproject / __init__)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: python tools/check_release.py --tag "$GITHUB_REF_NAME"
+      - name: 构建 wheel + sdist
+        run: python -m build
+      - name: 校验产物(twine check + 内容检查)
+        run: |
+          python -m twine check dist/*
+          python tools/check_release.py --dist dist
+      - name: 生成 SHA256SUMS
+        run: |
+          cd dist
+          sha256sum *.whl *.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: 发 GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write          # 建 Release / 传产物
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0       # 取上一个 tag, 用来生成 compare 链接
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - name: 生成 Release 说明
+        run: |
+          PREV="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)"
+          echo "上一个 tag: ${PREV:-（无）}"
+          python tools/make_release_notes.py \
+            --version "${GITHUB_REF_NAME#v}" \
+            --dist dist \
+            --out RELEASE_BODY.md \
+            --repo "$GITHUB_REPOSITORY" \
+            ${PREV:+--prev-tag "$PREV"}
+      - name: 创建(或更新) Release 并上传产物
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME 已存在, 覆盖上传"
+            gh release edit "$GITHUB_REF_NAME" --title "chrome-fp $GITHUB_REF_NAME" \
+              --notes-file RELEASE_BODY.md
+            gh release upload "$GITHUB_REF_NAME" \
+              dist/chrome_fp-*.whl dist/chrome_fp-*.tar.gz dist/SHA256SUMS --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" --title "chrome-fp $GITHUB_REF_NAME" \
+              --notes-file RELEASE_BODY.md --verify-tag \
+              dist/chrome_fp-*.whl dist/chrome_fp-*.tar.gz dist/SHA256SUMS
+          fi
+          gh release view "$GITHUB_REF_NAME" --json tagName,isDraft,assets \
+            --jq '{tag: .tagName, draft: .isDraft, assets: [.assets[].name]}'
+
+  # 可选: 发 PyPI。默认不开。要用: 仓库变量 ENABLE_PYPI=true, 并在 PyPI 配好
+  # Trusted Publisher(owner=DreamXiaoJing, repo=chrome-fp, workflow=release.yml, environment=pypi),
+  # 之后这个 job 才会跑, 不需要任何长期 token。
+  pypi:
+    name: 发 PyPI（可选, 需 ENABLE_PYPI=true）
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') && vars.ENABLE_PYPI == 'true'
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - name: 只保留发行包(SHA256SUMS 不发给 PyPI)
+        run: rm -f dist/SHA256SUMS && ls -l dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/

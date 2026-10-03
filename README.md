@@ -443,11 +443,49 @@ python -m pytest tests -q                    # 同上, 输出更紧凑
 
 ## 构建与发布
 
+### 自动发版（GitHub Actions，推荐）
+
+`.github/workflows/release.yml` —— **push 一个 `v*` tag 就自动发版**：
+
+```
+push tag v0.6.0
+      └─ test    跑 unittest（97 个用例）
+      └─ build   python -m build + twine check
+                 tools/check_release.py --tag $TAG --dist dist
+                 （tag / pyproject.toml / __init__.py 三者版本必须一致 + 产物内容检查）
+                 sha256sum > dist/SHA256SUMS
+      └─ release tools/make_release_notes.py 生成正文（含每个产物的 SHA256）
+                 gh release create —— 上传 *.whl / *.tar.gz / SHA256SUMS
+      └─ pypi    可选，见下
+```
+
+本机一条命令：
+
+```bash
+python tools/release.py patch        # 0.6.0 -> 0.6.1: 改版本号 + 跑测试 + 提交 + 打 tag + push
+python tools/release.py minor        # 0.6.0 -> 0.7.0
+python tools/release.py 0.7.0        # 指定版本
+python tools/release.py patch --dry-run     # 只打印要做什么
+```
+
+`tools/release.py` 会先跑测试，测试不过就把版本号改回来并中止；之后 Actions 接管构建与上传，
+本机不需要 twine。手动触发 `workflow_dispatch` 只跑测试+构建（产物留在 Actions artifact）。
+
+`.github/workflows/ci.yml`：push 到 `main` / PR 时跑测试 + 构建校验（目前只跑 Python 3.12，
+即本机验过的版本；要扩矩阵就改 `python-version` 列表）。
+
+**发 PyPI（可选，默认关）**：把仓库变量 `ENABLE_PYPI` 设为 `true`，并在 PyPI 配好
+Trusted Publisher（owner=`DreamXiaoJing`、repo=`chrome-fp`、workflow=`release.yml`、
+environment=`pypi`），release 流程里的 `pypi` job 就会用 OIDC 发布 —— 不需要任何长期 token。
+
+### 手动构建（备用）
+
 ```bash
 python -m pip install build wheel twine
 python -m build                    # 产出 dist/chrome_fp-0.6.0-py3-none-any.whl 和 .tar.gz
 python -m twine check dist/*       # README 渲染与元数据检查
 python -m twine upload dist/*      # -u __token__ -p pypi-xxxx (建议用 TWINE_PASSWORD 环境变量)
+python tools/check_release.py --tag v0.6.0 --dist dist   # 版本 + 产物自检
 ```
 
 - **当前仓库版本：0.6.0**（多版本 profile：新增 Chrome 154、153→154 A/B 实抓校对、
@@ -495,6 +533,9 @@ chrome_fp/
   exceptions.py   与 requests.exceptions 对应的异常层次
 tools/            真机抓包探针(tap_probe/run_capture/launch_chrome) + 指纹解析分析
                   (analyze_hello) + 本库与真机对比(verify_against_probe)
+                  + 发版工具(release.py 改版本号打 tag / check_release.py 一致性校验 /
+                  make_release_notes.py 生成 Release 正文)
+.github/workflows/  release.yml（tag 自动发版）+ ci.yml（push/PR 跑测试与构建）
 tests/            单元 + 与真机抓包的回归测试（97 个用例, 其中 17 个需要抓包数据）
 capture/          真机抓包证据（chrome154* / chrome153cft / library154；.gitignore 未提交）
 ```

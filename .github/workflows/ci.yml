@@ -1,0 +1,59 @@
+name: ci
+
+# 日常守卫: push 到 main / PR 时跑测试, 并确认包能构建、README 能过 twine check。
+# 目前只跑 Python 3.12(本机验过的版本); 要扩矩阵就改下面的 python-version 列表。
+# requires-python 声明 >=3.10, 3.10/3.13 没有实测过, 不敢写成绿的。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: 测试 (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: 安装运行时依赖
+        run: |
+          python -m pip install --upgrade pip "setuptools>=77" wheel
+          python -m pip install cryptography hpack brotli zstandard certifi
+      - name: unit tests
+        run: python -m unittest discover -s tests -v
+
+  build:
+    name: 构建校验
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 安装构建工具
+        run: python -m pip install --upgrade pip "setuptools>=77" build twine
+      - name: 构建 + twine check
+        run: |
+          set -euo pipefail
+          python -m build
+          python -m twine check dist/*
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-ci
+          path: dist/*
+          if-no-files-found: error
