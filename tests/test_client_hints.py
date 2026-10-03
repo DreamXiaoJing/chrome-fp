@@ -20,6 +20,16 @@ sys.path.insert(0, ROOT)
 
 from test_tls_features import make_cert  # noqa: E402
 
+# 这两个用例的服务端用 h2 当独立裁判; 缺 h2 时旧行为是线程挂掉、客户端死等(CI 上卡 10 分钟),
+# 现在改成显式跳过 —— CI 会装 h2, 所以那边照常跑。
+try:
+    import h2  # noqa: F401
+    HAVE_H2 = True
+except ImportError:                                  # pragma: no cover
+    HAVE_H2 = False
+
+NEED_H2 = unittest.skipUnless(HAVE_H2, "需要 h2 作为独立 HTTP/2 裁判: pip install h2")
+
 ACCEPT_CH = ("sec-ch-ua-full-version-list, sec-ch-ua-full-version, sec-ch-ua-arch, "
              "sec-ch-ua-bitness, sec-ch-ua-model, sec-ch-ua-platform-version, "
              "sec-ch-ua-wow64, device-memory, dpr, viewport-width, "
@@ -103,6 +113,7 @@ class HintServer:
                 pass
 
 
+@NEED_H2
 class TestAcceptCh(unittest.TestCase):
     def test_hints_sent_only_after_accept_ch(self):
         from chrome_fp import Session
@@ -219,6 +230,7 @@ class TestAcceptCh(unittest.TestCase):
         raise AssertionError(f"服务器没收到 {path}")
 
 
+@NEED_H2
 class TestCookiePlacement(unittest.TestCase):
     def test_cookie_sits_between_accept_language_and_priority(self):
         """探针抓包实测: cookie 在 accept-language 之后、priority 之前。

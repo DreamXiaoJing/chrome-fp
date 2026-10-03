@@ -24,15 +24,16 @@ jobs:
   test:
     name: 测试
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: 安装运行时依赖
+      - name: 安装运行时依赖 + 测试依赖(.[test] 里的 h2)
         run: |
           python -m pip install --upgrade pip "setuptools>=77" wheel
-          python -m pip install cryptography hpack brotli zstandard certifi
+          python -m pip install ".[test]"
       - name: unit tests (unittest discover, 与 README 一致)
         run: python -m unittest discover -s tests -v
 
@@ -40,6 +41,7 @@ jobs:
     name: 构建产物
     needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -72,6 +74,7 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write          # 建 Release / 传产物
     steps:
@@ -118,6 +121,7 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/v') && vars.ENABLE_PYPI == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment: pypi
     permissions:
       id-token: write

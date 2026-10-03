@@ -31,6 +31,8 @@ dependencies = [
 [project.optional-dependencies]
 # requests 也用它做 apparent_encoding; 装了就自动启用, 没装就退化成 utf-8
 encoding = ["charset-normalizer>=3"]
+# 跑测试需要: h2 在 test_http2_features / test_client_hints 里当独立 HTTP/2 裁判
+test = ["h2>=4"]
 dev = ["pqcrypto>=0.7", "kyber-py"]
 
 [project.urls]

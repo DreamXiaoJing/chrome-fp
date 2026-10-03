@@ -20,6 +20,16 @@ sys.path.insert(0, ROOT)
 
 from test_tls_features import make_cert  # noqa: E402
 
+# h2 只用于"独立裁判"式的服务端。缺了它时旧行为是: 服务线程抛 ModuleNotFoundError 挂掉,
+# 客户端一直等响应 -> 整个用例挂死(CI 上就这么卡了 10 分钟)。这里改成显式跳过。
+try:
+    import h2  # noqa: F401
+    HAVE_H2 = True
+except ImportError:                                  # pragma: no cover
+    HAVE_H2 = False
+
+NEED_H2 = unittest.skipUnless(HAVE_H2, "需要 h2 作为独立 HTTP/2 裁判: pip install h2")
+
 
 def settings_frame(payload: bytes = b"") -> bytes:
     """一个 SETTINGS 帧: 长度(3) || 类型(1) || 标志(1) || 流ID(4) || 载荷"""
@@ -149,6 +159,7 @@ class FlowControlServer:
                 pass
 
 
+@NEED_H2
 class TestRequestBodyFlowControl(unittest.TestCase):
     def test_upload_larger_than_connection_window(self):
         """200KB POST: 连接窗口只有 65535, 必须按 WINDOW_UPDATE 节奏发, 且一个字节不丢"""
