@@ -1,19 +1,20 @@
-"""HTTP/2 客户端 —— 帧序/SETTINGS/伪头顺序都按真 Chrome 153 复刻。
+"""HTTP/2 客户端 —— 帧序/SETTINGS/伪头顺序都按真 Chrome 复刻(153/154 两版 profile 通用)。
 
-真值(本轮真机抓包 + 解密, 见 capture/chrome153/):
+真值(真机抓包, 153.0.8010.x 与 154.0.8037.98 实测一致):
   Akamai 指纹 = 1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p
   1) SETTINGS: HEADER_TABLE_SIZE=65536, ENABLE_PUSH=0, INITIAL_WINDOW_SIZE=6291456,
      MAX_HEADER_LIST_SIZE=262144
   2) WINDOW_UPDATE(stream 0, +15663105)
-  3) HEADERS(stream 1, flags = END_STREAM|END_HEADERS, **不带 PRIORITY 标志**)
+  3) HEADERS(stream 1, flags = END_STREAM|END_HEADERS|**PRIORITY**, 带 5 字节前缀
+     E=1 / depends_on=0 / weight 由 RFC 9218 urgency 决定: u=0→256, u=1→220, u=3→147)
   4) 头顺序: :method :authority :scheme :path ...(按资源类型不同, 见 spec.header_order)
 
-与 Chrome 152 的两处差异(本轮抓包实测):
-  * **没有 PRIORITY 帧** —— 10/10 条连接里 PRIORITY 帧数量都是 0。旧版库里为
+与 Chrome 152 的两处差异(抓包实测):
+  * **没有 PRIORITY 帧** —— 每条连接里 PRIORITY 帧数量都是 0。旧版库里为
     stream 3/5/7/9 发的优先级树会让 Akamai 指纹第 3 段从 "0" 变成 "00:256,00:256,..."。
     Akamai 指纹第 4 段 "m,a,s,p" 是**伪头顺序**(method/authority/scheme/path),
     不是优先级流 —— 旧注释理解错了。
-  * HEADERS 帧不带 PRIORITY 标志, 也就没有 5 字节的 weight 前缀。
+  * HEADERS 的 PRIORITY 前缀按上面的 urgency 表来(2026-10 实测修正: 153/154 都带前缀)。
 """
 
 from __future__ import annotations
@@ -269,9 +270,12 @@ class H2Connection:
             (":scheme", scheme),
             (":path", path),
         ]
-        # 真 Chrome 153 的 HEADERS 不带 PRIORITY 标志(见模块 docstring), 默认不写优先级前缀
-        priority = None
-        if send_priority:
+        # 真机抓包(153.0.8010.x 与 154.0.8037.98 实测一致): HEADERS **带** PRIORITY 标志
+        # (flags 0x25), 前置 5 字节 (E=1, depends_on=0, weight=按 RFC 9218 urgency 查表)。
+        # 旧注释说"Chrome 153 的 HEADERS 不带 PRIORITY 标志"是错的 —— 少了这 5 字节,
+        # HEADERS 帧与真 Chrome 就不一样了。映射表见 spec.h2_priority_prefix()。
+        priority = spec.h2_priority_prefix(dict(headers).get("priority"))
+        if priority is None and send_priority:
             priority = {"exclusive": spec.H2_PRIORITY_EXCLUSIVE,
                         "depends_on": spec.H2_PRIORITY_DEPENDS_ON,
                         "weight": spec.H2_PRIORITY_WEIGHT}

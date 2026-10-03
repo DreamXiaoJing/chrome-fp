@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "chrome-fp"
-version = "0.5.0"
-description = "与真 Chrome 153 逐字节同指纹(JA4/HTTP2 Akamai/请求头顺序)的纯 Python HTTP 请求库, 用法与 requests 一致"
+version = "0.6.0"
+description = "与真 Chrome 逐字节同指纹(JA4/HTTP2 Akamai/请求头顺序)的纯 Python HTTP 请求库, 支持 Chrome 153/154 多版本 profile, 用法与 requests 一致"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"

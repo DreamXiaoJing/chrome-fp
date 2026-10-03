@@ -1,6 +1,7 @@
 # chrome-fp — 与真 Chrome 逐字节同指纹的纯 Python 请求库, 用法和 requests 一样
 
-用 Python 发 HTTP 请求, 但 TLS/HTTP2 指纹跟本机真 Chrome（**153.0.8010.48**）一致：
+用 Python 发 HTTP 请求, 但 TLS/HTTP2 指纹跟本机真 Chrome（**默认 154.0.8037.98**，
+可用 `chrome_version="153"` 切到 **153.0.8010.48**）一致：
 JA4、HTTP/2 Akamai 指纹、请求头顺序与取值、扩展集合、GREASE、ALPS、trust_anchors、
 PQ 混合密钥共享（X25519MLKEM768）全部对齐。
 
@@ -16,6 +17,41 @@ with requests.Session() as s:
     r = s.post("https://httpbin.org/post", json={"a": 1})
     r.raise_for_status()
 ```
+
+## 版本 profile：Chrome 154（默认）/ 153
+
+`Session(chrome_version=...)` 选版本，默认跟着最新 Stable（**154**，本机 154.0.8037.98）：
+
+```python
+from chrome_fp import Session
+Session()                        # Chrome 154（默认）
+Session(chrome_version="153")    # Chrome 153（153.0.8010.48）
+```
+
+2026-10-03 在本机做了 **153 ↔ 154 的 A/B 实抓**：Chrome for Testing 153.0.8010.47 与
+本机 Stable 154.0.8037.98 各抓 20+ 条真实连接（`tools/run_capture.py` 起本地 TLS/HTTP2
+探针 + 拉真 Chrome，`tools/analyze_hello.py` 解析）：
+
+| 项目 | Chrome 153 | Chrome 154 | 结论 |
+|---|---|---|---|
+| JA4_a / JA4_b | `t13d1517h2` / `8daaf6152771` | 完全相同 | 不变 |
+| cipher / supported_groups / sig_algs | — | 完全相同 | 不变 |
+| 扩展集合（17 个） | — | 完全相同 | 不变 |
+| `trust_anchors`(0xca34) | 28 个 ID | 同一集合 | 不变 |
+| H2 SETTINGS / WINDOW_UPDATE / 帧序 | — | 完全相同 | 不变 |
+| `sec-ch-ua` 品牌 | `"Google Chrome";v="153", "Not_A Brand";v="8", "Chromium";v="153"` | `"Chromium";v="154", "Google Chrome";v="154", "Not A(Brand";v="99"` | **随版本变** |
+| UA / full-version | `Chrome/153.0.0.0` | `Chrome/154.0.0.0` | **随版本变** |
+
+> **153 → 154 的 TLS/HTTP2 线格式没有变化**，差异只在版本字符串与 UA 品牌串。
+> profile 以 `dataclasses.replace` 从 153 派生 154，`spec.PROFILES` 里继续加版本即可。
+
+同一套探针也用来验证**本库自己**：把库指向探针抓一遍，与真 Chrome 154 逐项对比 ——
+ClientHello 的 cipher / groups / sig_algs / 扩展集合 / trust_anchors / session_id /
+key_share / ALPN **8 项全一致**，JA4（含去 GREASE 的 c 段）三处字符串完全相同。
+
+本轮还修掉一处**旧实现与真机不符**的地方：真 Chrome 的 HEADERS 帧带 `PRIORITY` 标志
+（flags `0x25`），前面有 5 字节 `E=1 / depends_on=0 / weight=按 RFC 9218 urgency 查表`
+（`u=0→256`、`u=1→220`、`u=3→147`）。153/154 实测**都带**，之前实现少发这 5 字节。
 
 ## 本轮做了什么：拿真机抓包把库对齐
 
@@ -239,7 +275,8 @@ Session(cert=...)                              # 会话级
 
 | 能力 | 状态 |
 |---|---|
-| Chrome 153 帧序（preface/SETTINGS/WINDOW_UPDATE/HEADERS） | ✅ |
+| Chrome 帧序（preface/SETTINGS/WINDOW_UPDATE/HEADERS，153/154 一致） | ✅ |
+| **HEADERS 的 PRIORITY 前缀**（`0x25` + `E=1/dep=0/weight=urgency` 查表，153/154 都带） | ✅ |
 | **TLS 记录分帧**（preface+SETTINGS+WINDOW_UPDATE 合成一条 record） | ✅ |
 | **HPACK 编码选择与 Chromium 一致**（见下） | ✅ |
 | **请求体流控**（连接窗口 + 流窗口，等 WINDOW_UPDATE） | ✅ |
@@ -369,8 +406,9 @@ python tools/verify_pypi.py        # 拉回 PyPI 比 sha256, 确认传上去的�
 
 - 已发布：**chrome-fp 0.5.0**（<https://pypi.org/project/chrome-fp/0.5.0/>）
   —— Chromium 一致的 HPACK 编码 / TLS 记录分帧 / Accept-CH 高熵 hints
-- 历史版本：0.4.0（HRR / TLS1.2 CBC / 客户端证书 / HTTP2 请求体流控 / 真流式）、
-  0.3.0（Chrome 153 指纹对齐）、0.2.x（Chrome 152）
+- 历史版本：**0.6.0（多版本 profile：新增 Chrome 154，153→154 A/B 实抓校对；
+  修正 HEADERS 的 PRIORITY 前缀）**、0.4.0（HRR / TLS1.2 CBC / 客户端证书 /
+  HTTP2 请求体流控 / 真流式）、0.3.0（Chrome 153 指纹对齐）、0.2.x（Chrome 152）
 
 ```bash
 pip install chrome-fp             # 或者 pip install "chrome-fp[encoding]"
@@ -388,7 +426,8 @@ pip install chrome-fp             # 或者 pip install "chrome-fp[encoding]"
 
 ```
 chrome_fp/
-  spec.py         Chrome 153 指纹常量 + 每种资源类型的头顺序 profile（全部标注出处）
+  spec.py         多版本 profile（Profile 数据类 + PROFILES 注册表 + 153/154 常量 +
+                  每种资源类型的头顺序，全部标注出处；旧的大写常量名继续可用）
   hello.py        按 BoringSSL ssl_add_clienthello_tlsext 规则拼 ClientHello
   fingerprint.py  解析 + JA3/JA4 计算
   tls13.py        纯 Python TLS 1.3 客户端（record 层/密钥调度/CV 校验/证书链校验/KeyUpdate/keylog）
@@ -424,9 +463,21 @@ capture/          本轮真 Chrome 153 的抓包与判定结果
 
 ## 真值来源
 
-1. 本机真 Chrome **153.0.8010.48**（Windows x64）的抓包：22 条 ClientHello +
-   10 条 HTTP/2 连接（`capture/chrome153/`），JA4 由 tshark 4.6.4 判定
-2. 本地 Chromium/BoringSSL 源码：
+1. 本机真 Chrome 的抓包：
+   - **154.0.8037.98**（Windows x64, Stable）：22 条 ClientHello + 20 条 HTTP/2 连接，
+     另有第二次启动复核 UA 品牌与 trust_anchors 顺序（`capture/chrome154*`）
+   - **153.0.8010.48**（Windows x64, Stable）：22 条 ClientHello + 10 条 HTTP/2 连接
+     （`capture/chrome153/`），JA4 由 tshark 4.6.4 判定
+   - A/B 对照用的 Chrome for Testing **153.0.8010.47**（`capture/chrome153cft/`）；
+     注意它是 Chromium 分支（`sec-ch-ua` 无 Google Chrome 品牌），且多一个构建特有的
+     扩展 `0x12e0`，所以只用于对照 TLS/H2 线格式，不当作 Stable 153 的品牌基准
+2. 抓包工具（本轮新增/重写，替代已删除的旧 tools）：
+   - `tools/tap_probe.py` —— 本地 TLS/HTTP2 探针，记录 ClientHello 原字节 + 解密后的
+     H2 帧与请求头（MemoryBIO 驱动，握手期的原始字节逐字节留档）
+   - `tools/run_capture.py` —— 起探针 + 拉真 Chrome + 收日志的一条龙入口
+   - `tools/analyze_hello.py` —— 解析 ClientHello/JA4/trust_anchors 并与 profile 逐项 diff
+   - `tools/verify_against_probe.py` —— 把**本库**指向同一探针，和真 Chrome 对比字节
+3. 本地 Chromium/BoringSSL 源码：
    - 扩展表顺序与置换：`boringssl/src/ssl/extensions.cc:4067-4295, 4306-4328`
    - GREASE 首尾与 padding 规则：`extensions.cc:4489-4560`
    - ECH GREASE 长度：`boringssl/src/ssl/encrypted_client_hello.cc:732-784`

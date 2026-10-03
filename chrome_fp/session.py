@@ -343,9 +343,14 @@ class Session:
         keylog_file: str | None = None,
         client_hints: bool = True,
         client_hint_values: dict | None = None,
+        # ---- 版本 ----
+        chrome_version: str = spec.DEFAULT_VERSION,      # "154"(默认) / "153"
     ):
         if mode not in ("navigate", "cors", "no-cors", "none"):
             raise ValueError(f"mode 必须是 navigate/cors/no-cors/none, 收到 {mode!r}")
+        # 选定版本 profile: 之后所有 spec.* 读取都指向这一版(见 spec.__getattr__)
+        self.profile = spec.get_profile(chrome_version)
+        self._profile_token = spec.activate(self.profile)
         if dest is not None and dest not in spec.SUPPORTED_DESTS:
             raise ValueError(f"dest 必须是 {spec.SUPPORTED_DESTS} 之一, 收到 {dest!r}")
 
@@ -439,7 +444,8 @@ class Session:
 
     @property
     def user_agent(self) -> str:
-        return self._user_agent or UA
+        # 动态取当前 profile 的 UA, 不能用模块级快照(否则 153 Session 会发 154 的 UA)
+        return self._user_agent or spec.DEFAULT_USER_AGENT
 
     def _slot_values(self, method: str, parts, dest: str, mode: str,
                      body: bytes | None, origin: str | None) -> dict:
@@ -776,6 +782,8 @@ class Session:
         max_redirects: int | None = None,
     ) -> Response:
         """与 requests.Session.request 同签名; 额外多了 dest/mode/origin/referer/priority 用于控制指纹头。"""
+        # 跨线程使用时也保证读到的是本 Session 的版本 profile(Session 不是线程安全的)
+        spec.activate(self.profile)
         if not url:
             raise URLRequired("没有提供 URL")
         method = method.upper()
