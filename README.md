@@ -44,6 +44,11 @@ Session(chrome_version="153")    # Chrome 153（153.0.8010.48）
 
 > **153 → 154 的 TLS/HTTP2 线格式没有变化**，差异只在版本字符串与 UA 品牌串。
 > profile 以 `dataclasses.replace` 从 153 派生 154，`spec.PROFILES` 里继续加版本即可。
+>
+> 实现细节：`spec` 模块级常量（`CHROME_VERSION`、`CIPHER_SUITES`…）**跟随"当前生效
+> profile"**（PEP 562 模块级 `__getattr__` + ContextVar），所以 `Session(chrome_version="153")`
+> 建出来之后，同线程里读 `spec.CHROME_VERSION` 会得到 153；每个 `Session.request()` 也会
+> 重新切回自己的版本，多版本可共存于同一进程。旧代码里的全大写常量名**继续可用**。
 
 同一套探针也用来验证**本库自己**：把库指向探针抓一遍，与真 Chrome 154 逐项对比 ——
 ClientHello 的 cipher / groups / sig_algs / 扩展集合 / trust_anchors / session_id /
@@ -53,13 +58,46 @@ key_share / ALPN **8 项全一致**，JA4（含去 GREASE 的 c 段）三处字�
 （flags `0x25`），前面有 5 字节 `E=1 / depends_on=0 / weight=按 RFC 9218 urgency 查表`
 （`u=0→256`、`u=1→220`、`u=3→147`）。153/154 实测**都带**，之前实现少发这 5 字节。
 
-## 本轮做了什么：拿真机抓包把库对齐
+## 抓包与验证工具链（2026-10 现状）
+
+旧的 `tools/` 在目录清理中丢失，本轮重写了一条**不依赖 tshark、也不需要管理员权限**的探针链，
+153 / 154 两个版本都用它校对：
+
+```bash
+# 1) 抓真 Chrome: 起本地 TLS/HTTP2 探针 + 拉 Chrome(临时 profile, 不碰你在用的配置)
+python tools/run_capture.py --out capture/chrome154 --ports 8443-8462 --seconds 25
+#    Chrome for Testing 等非默认安装: --chrome <path> --extra=--no-sandbox
+
+# 2) 解析 ClientHello / JA4 / trust_anchors, 并对着 profile 逐项 diff
+python tools/analyze_hello.py --dir capture/chrome154 --diff
+
+# 3) 把**本库**指向同一个探针, 和真 Chrome 的字节逐项对比
+python tools/tap_probe.py --ports 8443-8446 --out capture/library154 --wait 45
+python tools/verify_against_probe.py --port 8443
+```
+
+| 工具 | 作用 |
+|---|---|
+| `tools/tap_probe.py` | 本地 TLS/HTTP2 探针：MemoryBIO 驱动，**握手期的原始字节逐字节留档**，并解出 H2 帧与请求头 |
+| `tools/run_capture.py` | 起探针 + 拉真 Chrome + 收日志（Chrome 是 GUI 子系统程序，PowerShell 抓不到它的 stdout） |
+| `tools/launch_chrome.py` | 单独启动 Chrome 打探针（host-resolver-rules + 临时 profile + `--no-proxy-server`） |
+| `tools/analyze_hello.py` | 解析 ClientHello / JA4 / 扩展 / trust_anchors，`--diff` 直接与 profile 对比 |
+| `tools/verify_against_probe.py` | 用本库发请求走同一探针，与真 Chrome 逐项比字节 |
+
+抓包证据放在 `capture/`（`chrome154*`、`chrome153cft`、`library154`）；按"仓库只留代码"的取舍，
+`capture/` 在 `.gitignore` 里，没有提交。
+
+## 第 1 轮（0.2.x → 0.3.0）：对齐 Chrome 153（历史记录）
+
+> 下面这段是当时（0.3.0）的做法与结论，保留作历史记录。它引用的
+> `tools/tap_proxy.py`、`analyze_capture.py`、`tls13_decrypt.py`、`h2_frames.py`、`diff_fp.py`
+> 和 `capture/chrome153/` 已经在目录清理中丢失，**当前可用的工具见上一节**。
 
 本机是非管理员，Npcap/dumpcap 直接拒绝抓包
 （`You do not have permission to capture on device`）。所以改用**应用层旁路抓包**：
 
 ```
-Chrome ──CONNECT──> tools/tap_proxy.py ──> 真实服务器 / 本地 h2 服务器
+Chrome ──CONNECT──> tools/tap_proxy.py (旧, 已丢失) ──> 真实服务器 / 本地 h2 服务器
                           │
                           ├─ 原样录下双向字节（不改一个字节）
                           ├─ 合成 TCP 头写成 .pcap  ──> tshark / Wireshark 打开
@@ -79,10 +117,10 @@ Chrome ──CONNECT──> tools/tap_proxy.py ──> 真实服务器 / 本地 
 | `tls_diff.txt` | 与库的逐扩展对比结论（`完全一致`） |
 | `report.json` | tshark 判定结果（JA4/JA3/扩展/key_share…） |
 
-抓包自己也能复现：
+当时的复现命令（**工具已丢失，现在跑不了**；当前入口见「抓包与验证工具链」一节）：
 
 ```bash
-python tools/run_capture.py --out capture/chrome153 --sites https://example.com/
+python tools/run_capture.py --out capture/chrome153 --sites https://example.com/   # 旧版入口
 python tools/analyze_capture.py --dir capture/chrome153      # tshark 出 JA4 等
 python tools/tls13_decrypt.py   capture/chrome153            # 自己解密出 h2 明文
 python tools/h2_frames.py       capture/chrome153            # 解 HTTP/2 帧与请求头
@@ -123,13 +161,13 @@ tshark -r capture/chrome153/chrome_tap.pcap \
 > 如果你想要网卡级抓包，用管理员权限跑
 > `dumpcap -i <网卡> -w out.pcapng` 即可，分析流程完全一样。
 
-### 抓出来的差异（已全部修掉）
+### 抓出来的差异（0.3.0 已修；其中 #3 在 0.6.0 修正为相反结论）
 
 | # | 项目 | 真 Chrome 153 | 旧库 (0.2.3) | 处理 |
 |---|---|---|---|---|
 | 1 | `trust_anchors`(0xca34) ID 数量 | **28 个** | 32 个（152 的集合） | 去掉 `d6790902/03/09/0e` 四个 |
 | 2 | HTTP/2 `PRIORITY` 帧 | **一个都不发** | 默认发 3/5/7/9 四帧 | `send_priority_tree` 默认关 |
-| 3 | `HEADERS` 帧标志 | 不带 PRIORITY 前缀 | 带 5 字节 weight 前缀 | 默认不写 |
+| 3 | `HEADERS` 帧标志 | **带 `PRIORITY` 前缀**（flags `0x25`） | 带 5 字节 weight 前缀 | 0.3.0 当时误判为"不带"、把前缀删了；**0.6.0 实抓修正为带上**（与 #2 的"不发 PRIORITY 帧"不矛盾：帧不发，但 HEADERS 的标志位和前缀要带） |
 | 4 | Akamai 指纹第 3/4 段 | `0` / `m,a,s,p` | 会被 #2 改成 `00:256,...` | 修正；`m,a,s,p` 其实是**伪头顺序** |
 | 5 | `sec-ch-ua` | `"Google Chrome";v="153", "Not_A Brand";v="8", "Chromium";v="153"` | 152 的品牌、顺序也不同 | 更新 |
 | 6 | `sec-ch-ua-platform` | `"Windows"` | `"Linux"` | 更新 |
@@ -144,11 +182,8 @@ EMS、session_id…）经逐字节比对**与 Chrome 153 完全一致**。
 
 ### 验证结果
 
-```bash
-python tools/verify_live.py
-```
-
-让**本库**走同一个代理访问同一个本地 h2 服务器，再和 Chrome 的抓包对比：
+当时用 `tools/verify_live.py` 让**本库**走同一个代理访问同一个本地 h2 服务器，再和 Chrome 的抓包对比
+（该脚本已丢失；现在的等价做法是 `tools/verify_against_probe.py`）：
 
 ```
 [2/4] TLS ClientHello 对比     密码套件/扩展集合/扩展数量/trust_anchors/groups/sigalgs/versions  全部 OK
@@ -160,16 +195,23 @@ python tools/verify_live.py
 
 ## 实测结果
 
-| 项目 | 真 Chrome 153 | 本库 |
-|---|---|---|
-| JA4 | `t13d1517h2_8daaf6152771_<随机>` | **一致**（17/17 条样本） |
-| HTTP/2 Akamai | `1:65536;2:0;4:6291456;6:262144\|15663105\|0\|m,a,s,p` | **一致**（10/10 条连接） |
-| 扩展数 | 17 真实 + 2 GREASE | **一致** |
-| trust_anchors | 28 个 ID（集合固定、顺序随机） | **一致** |
-| 请求头顺序/取值 | 导航与子资源各一套 | **一致**（逐条比对） |
+下表是本轮（2026-10-03）两个版本各自的样本量；"本库"一列是**把库指向同一探针**抓出来的结果。
 
-实网站点：`python tools/live_sites.py` → 5/5
-（example.com / taobao h2+TLS1.3，baidu / qq / sohu TLS1.2 回落 + HTTP/1.1）
+| 项目 | 真 Chrome 153（20~22 条样本） | 真 Chrome 154（22 条样本 / 20 条连接） | 本库 |
+|---|---|---|---|
+| JA4 | `t13d1517h2_8daaf6152771_<随机>` | 同左（逐字符相同，含去 GREASE 的 c 段） | **一致** |
+| HTTP/2 Akamai | `1:65536;2:0;4:6291456;6:262144\|15663105\|0\|m,a,s,p` | 同左 | **一致** |
+| 扩展集合 | 17 真实 + 2 GREASE | 同左 | **一致** |
+| trust_anchors | 28 个 ID（集合固定、顺序随启动变） | 同一集合 | **一致** |
+| HEADERS 的 PRIORITY 前缀 | 带（`u=0→256` / `u=1→220` / `u=3→147`） | 同左 | **一致** |
+| 请求头顺序/取值 | 导航与子资源各一套 | 同左 | **一致**（逐条比对） |
+
+实网站点冒烟（`tools/live_sites.py`，该脚本已丢失，结论保留）：
+
+```
+example.com / taobao  h2 + TLS1.3
+baidu / qq / sohu     TLS1.2 回落 + HTTP/1.1        5/5 OK
+```
 
 ## requests 兼容的用法
 
@@ -220,7 +262,7 @@ Session(
     origin=None, referer=None,         # CORS / 子资源请求的上下文
     sec_fetch_site=None,               # none|same-origin|same-site|cross-site
     priority=None,                     # 覆盖 RFC 9218 priority 头
-    send_priority_tree=False,          # 只有模拟 Chrome 152 才打开
+    send_priority_tree=False,          # 只有模拟 Chrome 152 才打开(153/154 都不发 PRIORITY 帧)
     verify=True, ca_file=None, allow_tls12=True,
     timeout=30, max_redirects=30, trust_env=True,
     keylog_file=None,                  # 写 NSS key log, Wireshark 可直接解密本库流量
@@ -288,7 +330,8 @@ Session(cert=...)                              # 会话级
 **HPACK 为什么重要**：头**解码后**一样 ≠ **编码后**一样。JA3/JA4/Akamai 都不看 HPACK，
 但服务器/中间盒 dump 一下 HEADERS 帧的原始载荷，就能用编码方式把客户端区分开。
 `hpack_chromium.py` 复刻了 Chromium 的选择规则，规则是从真机抓包里**统计**出来的
-（`tools/diff_wire.py` 会复核）：
+（当时用 `tools/diff_wire.py` 复核，该脚本已丢失；本轮的探针 `tools/tap_probe.py`
+能把每条连接的 HEADERS 原始载荷按序留档，可用来重做同样的比对）：
 
 | 规则 | 证据（真 Chrome 153 抓包） |
 |---|---|
@@ -306,7 +349,8 @@ Session(cert=...)                              # 会话级
 网站用 `Accept-CH` 点单后，真 Chrome 会在**后续**请求里带上高熵 client hints。完全不发的话，
 凡是下发过 `Accept-CH` 的站（不少 CDN 都发）一眼就能看出不是浏览器 —— 这比 JA3 更硬。
 本库按规范跟踪每个源的 `Accept-CH`，命中后按 Chrome 的**内部固定顺序**回发
-（顺序与取值来自探针抓包，用 `tools/run_capture.py --probe` + `CHROME_FP_ACCEPT_CH` 可复现）。
+（顺序与取值来自探针抓包；本轮重写的探针 `tools/tap_probe.py` 会把每个请求的头顺序
+原样记进 `probe.json`，可直接复核）。
 
 ```python
 Session(client_hints=True)                            # 默认开
@@ -343,7 +387,7 @@ DNS 返回多个地址（尤其 IPv6 排在前面）时会**自己遍历并 IPv4
 | 层 | 现状 |
 |---|---|
 | TLS/HTTP2 **内容**指纹（JA3/JA4/Akamai/扩展集合/头顺序） | 对齐（见上面各表） |
-| **线上字节细节**（TLS 记录分帧、HPACK 编码） | **已对齐**（`tools/diff_wire.py` 复核：32/32、11/11） |
+| **线上字节细节**（TLS 记录分帧、HPACK 编码） | **已对齐**（当时用 `tools/diff_wire.py` 复核 32/32、11/11；该脚本已丢失） |
 | **Client Hints**（Accept-CH） | 机制已实现，UA 派生取值未直接抓包验证 |
 | 行为 / JS / 跨层一致性 | **做不到**，见下 |
 
@@ -362,10 +406,11 @@ DNS 返回多个地址（尤其 IPv6 排在前面）时会**自己遍历并 IPv4
 ## 故意不实现的部分（附原因）
 
 - **TLS 1.3 会话恢复（PSK / session ticket）**：恢复用的 ClientHello 会多出
-  `pre_shared_key` 扩展，**JA4 与首次连接不同**。本库的真值来自 Chrome 5 次全新 profile
-  的首次连接（17 条样本全是 19 扩展、无 PSK），没有抓到 Chrome 的恢复握手样本。
+  `pre_shared_key` 扩展，**JA4 与首次连接不同**。本库的真值来自 Chrome 全新 profile
+  的首次连接（17 条真实扩展 + 2 GREASE、无 PSK），没有抓到 Chrome 的恢复握手样本。
   在没有真值的情况下实现，只会让指纹从"确定对"变成"可能错"，所以宁可不做。
-  需要的话可以先用 `tools/run_capture.py` 抓同一 profile 的第二次导航来拿真值。
+  要拿真值需要在**同一个 profile** 里连打两次 —— 本轮的 `tools/run_capture.py` 每次都用
+  全新临时 profile，所以抓不到 `pre_shared_key`，需要改造后才有样本。
 - **0-RTT / early_data**：本库的 ClientHello 与真 Chrome 一样不带 `early_data`（0x002a），
   发早期数据会直接改变指纹。
 - **ECH 真加密**：需要 DNS HTTPS 记录里的 ECHConfigList + HPKE。Chrome 只在站点发布
@@ -377,15 +422,18 @@ DNS 返回多个地址（尤其 IPv6 排在前面）时会**自己遍历并 IPv4
 ## 测试
 
 ```bash
-python -m unittest discover -s tests -v      # 86 个用例
-python tools/verify_live.py                  # 端到端: 本库 vs 真 Chrome 抓包
-python tools/diff_wire.py                    # 线级: TLS 记录分帧 + HPACK 编码字节
-python tools/live_sites.py                   # 实网站点冒烟
+python -m unittest discover -s tests -v      # 97 个用例(80 通过 / 17 跳过)
+python -m pytest tests -q                    # 同上, 输出更紧凑
 ```
+
+> 需要抓包数据的用例（`test_chrome153_fingerprint.py`）在本机找不到 `capture/chrome153/`
+> 时会**自动跳过** —— 就是那 17 个 skip。端到端 / 线级校验现在走
+> 「抓包与验证工具链」一节的 `tools/run_capture.py` + `tools/verify_against_probe.py`。
 
 | 测试文件 | 覆盖 |
 |---|---|
-| `test_chrome153_fingerprint.py` | 把 ClientHello / 请求头钉死在真机抓包上（含 key_share 私钥配对回归） |
+| `test_profiles.py` | **多版本 profile**：153/154 注册与切换、旧常量兼容、JA4 前缀、HEADERS 优先级前缀 |
+| `test_chrome153_fingerprint.py` | 把 ClientHello / 请求头钉死在真机抓包上（含 key_share 私钥配对回归；无抓包数据时跳过） |
 | `test_hpack_chromium.py` | **HPACK 编码逐字节复现真 Chrome**（含动态表连续状态） |
 | `test_client_hints.py` | Accept-CH 跟踪、高熵 hint 顺序/取值、cookie 位置 |
 | `test_requests_api.py` | requests 语法、cookie jar、重定向、多地址连接 |
@@ -397,30 +445,32 @@ python tools/live_sites.py                   # 实网站点冒烟
 
 ```bash
 python -m pip install build wheel twine
-python -m build                    # 产出 dist/chrome_fp-0.4.0-py3-none-any.whl 和 .tar.gz
-python tools/verify_build.py       # 校验产物(清单/METADATA/隔离安装冒烟/sdist 自举)
+python -m build                    # 产出 dist/chrome_fp-0.6.0-py3-none-any.whl 和 .tar.gz
 python -m twine check dist/*       # README 渲染与元数据检查
 python -m twine upload dist/*      # -u __token__ -p pypi-xxxx (建议用 TWINE_PASSWORD 环境变量)
-python tools/verify_pypi.py        # 拉回 PyPI 比 sha256, 确认传上去的和本地逐字节一致
 ```
 
+- **当前仓库版本：0.6.0**（多版本 profile：新增 Chrome 154、153→154 A/B 实抓校对、
+  修正 HEADERS 的 PRIORITY 前缀）—— 已提交，**尚未发 PyPI**
 - 已发布：**chrome-fp 0.5.0**（<https://pypi.org/project/chrome-fp/0.5.0/>）
   —— Chromium 一致的 HPACK 编码 / TLS 记录分帧 / Accept-CH 高熵 hints
-- 历史版本：**0.6.0（多版本 profile：新增 Chrome 154，153→154 A/B 实抓校对；
-  修正 HEADERS 的 PRIORITY 前缀）**、0.4.0（HRR / TLS1.2 CBC / 客户端证书 /
-  HTTP2 请求体流控 / 真流式）、0.3.0（Chrome 153 指纹对齐）、0.2.x（Chrome 152）
+- 历史版本：0.4.0（HRR / TLS1.2 CBC / 客户端证书 / HTTP2 请求体流控 / 真流式）、
+  0.3.0（Chrome 153 指纹对齐）、0.2.x（Chrome 152）
 
 ```bash
 pip install chrome-fp             # 或者 pip install "chrome-fp[encoding]"
 ```
 
-`verify_build.py` 会把 wheel 解到临时目录，用**那个副本**跑一遍真实功能
-（拼 ClientHello、算 JA4、requests 风格 prepare_request），确保校验的不是源码树；
-再确认 sdist 解包后能自己重新构建出 wheel。
+产物内容（0.6.0 实测）：
 
-- wheel 里只有 `chrome_fp` 包（16 个模块）+ LICENSE + METADATA
-- sdist 额外带 `tests/`、`tools/`，但不含体积大的 `capture/` 抓包数据
-- `chrome_fp.zip` 是同样内容的便携 zip（源码 + README + pyproject + LICENSE）
+- wheel：`chrome_fp` 包 **17 个模块** + `LICENSE` + `METADATA`
+- sdist：额外带 `tests/`（8 个测试文件），**不含 `tools/`** —— 旧 `MANIFEST.in` 在目录
+  清理中丢失，需要把工具链也打进 sdist 的话得补回 `MANIFEST.in`（或写进
+  `[tool.setuptools]` 的 `sdist` 配置）
+- `capture/` 抓包数据不进任何产物
+
+> 0.5.0 之前的构建/发布校验脚本（`tools/verify_build.py`、`tools/verify_pypi.py`）
+> 已随目录清理丢失，本轮没有重建；上面列的是当前能跑的命令。
 
 ## 目录结构
 
@@ -443,9 +493,10 @@ chrome_fp/
   api.py          模块级 get/post/...（与 requests 同名同签名）
   structures.py   CaseInsensitiveDict / RequestsCookieJar
   exceptions.py   与 requests.exceptions 对应的异常层次
-tools/            抓包(代理/本地h2服务器/解密)、分析(tshark/HTTP2)、构建与发布校验
-tests/            单元 + 与真机抓包的回归测试（71 个用例）
-capture/          本轮真 Chrome 153 的抓包与判定结果
+tools/            真机抓包探针(tap_probe/run_capture/launch_chrome) + 指纹解析分析
+                  (analyze_hello) + 本库与真机对比(verify_against_probe)
+tests/            单元 + 与真机抓包的回归测试（97 个用例, 其中 17 个需要抓包数据）
+capture/          真机抓包证据（chrome154* / chrome153cft / library154；.gitignore 未提交）
 ```
 
 ## 已知边界
@@ -455,8 +506,10 @@ capture/          本轮真 Chrome 153 的抓包与判定结果
   暂时无法进一步定位。其余实测站点正常。
 - **JA3 每次连接都不同**，这是真 Chrome 的行为（扩展顺序随机置换），不是 bug；
   稳定的标识是 **JA4**。
-- 扩展顺序、GREASE 取值、ECH GREASE 长度、trust_anchors 顺序都是每次连接随机的
-  （与 Chrome 相同分布）。
+- 扩展顺序、GREASE 取值、ECH GREASE 长度**每次连接**都重新随机（与 Chrome 相同分布）。
+- `trust_anchors` 的**顺序**是在**启动之间**变的（CfT 153 两次独立启动给出两个不同顺序），
+  同一次启动内固定；**集合**恒定。本库发的是其中一个合法顺序（与 Stable 154 实测一致），
+  所以集合一定对、顺序可能落在另一个排列上。
 - 会话恢复 / 0-RTT / ECH 真加密 / QUIC-HTTP3 故意未实现，原因见上面「故意不实现的部分」。
 - 连接策略是 **IPv4 优先**（Chrome 用 happy eyeballs 并发尝试）。对黑白洞 IPv6 的环境
   这是必要的取舍，但严格来说与 Chrome 的连接时序不同 —— 这不影响 TLS/HTTP2 指纹。
@@ -466,8 +519,9 @@ capture/          本轮真 Chrome 153 的抓包与判定结果
 1. 本机真 Chrome 的抓包：
    - **154.0.8037.98**（Windows x64, Stable）：22 条 ClientHello + 20 条 HTTP/2 连接，
      另有第二次启动复核 UA 品牌与 trust_anchors 顺序（`capture/chrome154*`）
-   - **153.0.8010.48**（Windows x64, Stable）：22 条 ClientHello + 10 条 HTTP/2 连接
-     （`capture/chrome153/`），JA4 由 tshark 4.6.4 判定
+   - **153.0.8010.48**（Windows x64, Stable）：22 条 ClientHello + 10 条 HTTP/2 连接，
+     JA4 由 tshark 4.6.4 判定 —— **这批数据（`capture/chrome153/`）已在目录清理中丢失**，
+     只剩结论；好在 153 的线格式与 154 完全一致（见上面的 A/B 表）
    - A/B 对照用的 Chrome for Testing **153.0.8010.47**（`capture/chrome153cft/`）；
      注意它是 Chromium 分支（`sec-ch-ua` 无 Google Chrome 品牌），且多一个构建特有的
      扩展 `0x12e0`，所以只用于对照 TLS/H2 线格式，不当作 Stable 153 的品牌基准

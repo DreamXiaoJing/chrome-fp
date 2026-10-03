@@ -70,6 +70,9 @@ class TestRegistry(unittest.TestCase):
 
     def test_legacy_module_constants(self):
         """旧代码里的 spec.CHROME_VERSION / spec.DEFAULT_USER_AGENT 等必须继续可用。"""
+        # 模块级常量反映"当前生效 profile"; 别的用例(或用户建 153 Session)会切走,
+        # 所以这里显式切回默认版本再断言 —— 否则用例顺序一变就假失败。
+        spec.activate(DEFAULT_VERSION)
         self.assertEqual(spec.CHROME_VERSION, REAL[DEFAULT_VERSION]["version"])
         self.assertIn(REAL[DEFAULT_VERSION]["ua"], spec.DEFAULT_USER_AGENT)
         self.assertEqual(len(spec.CIPHER_SUITES), 15)
@@ -114,6 +117,8 @@ class TestProfiles(unittest.TestCase):
         self.assertEqual(s153.profile.name, "153")
         self.assertIn(REAL["153"]["ua"], s153.user_agent)
         self.assertEqual(s153.client_hint_values["sec-ch-ua"], REAL["153"]["sec_ch_ua"])
+        # 用完切回默认, 免得影响同进程后面的用例(模块级常量跟着"当前 profile"走)
+        spec.activate(DEFAULT_VERSION)
 
     def test_default_session_is_latest(self):
         self.assertEqual(Session().profile.name, DEFAULT_VERSION)
